@@ -69,13 +69,42 @@ st.markdown("""
         padding: 2px;
         margin: 2px;
     }
+    .search-box {
+        margin-bottom: 10px;
+        padding: 10px;
+        border-radius: 5px;
+        background-color: rgba(0,0,0,0.05);
+    }
+    .metrics-container {
+        padding: 10px;
+        margin-bottom: 15px;
+        border-radius: 5px;
+        background-color: rgba(0,0,0,0.02);
+    }
+    .workflow-section {
+        margin-top: 20px;
+        padding: 15px;
+        border-radius: 8px;
+        background-color: rgba(0,0,0,0.02);
+    }
+    .dark-mode .detail-container {
+        background-color: #2d2d2d;
+    }
+    .dark-mode .search-box {
+        background-color: rgba(255,255,255,0.05);
+    }
+    .dark-mode .metrics-container, .dark-mode .workflow-section {
+        background-color: rgba(255,255,255,0.02);
+    }
 </style>
 """, unsafe_allow_html=True)
 
+@st.cache_data
 def get_document_list(doc_dir=DOCUMENT_DIR):
     md_files = glob.glob(os.path.join(doc_dir, "*.md"))
     return {os.path.basename(f).replace(".md", ""): f for f in md_files}
 
+@st.cache_data
 def read_markdown_document(file_path):
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -102,6 +131,8 @@ def read_markdown_document(file_path):
 def display_document_pages(doc_name, pages_dict, analyzed_pages, answer_pages):
     st.subheader(f"Document Pages for {doc_name}")
     
+    search_query = st.text_input("Search within document pages:", key=f"page_search_{doc_name}")
+    
     num_pages = len(pages_dict)
     cols_per_row = 15
     
@@ -110,12 +141,34 @@ def display_document_pages(doc_name, pages_dict, analyzed_pages, answer_pages):
     st.write("- 🔵 : Pages analyzed but not in final answer")
     st.write("- Unmarked: Pages not analyzed")
     
-    for i in range(0, num_pages, cols_per_row):
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        jump_page = st.number_input("Jump to page:", min_value=1, max_value=max(pages_dict.keys()), step=1)
+    with col2:
+        if st.button("Go to page", key=f"jump_{doc_name}"):
+            st.session_state.selected_page = {
+                'doc': doc_name,
+                'num': jump_page,
+                'content': pages_dict.get(jump_page, "Page not found")
+            }
+    
+    filtered_pages = list(sorted(pages_dict.keys()))
+    if search_query:
+        filtered_pages = [
+            page_num for page_num in filtered_pages 
+            if search_query.lower() in pages_dict[page_num].lower()
+        ]
+        if filtered_pages:
+            st.success(f"Found {len(filtered_pages)} pages containing '{search_query}'")
+        else:
+            st.warning(f"No pages found containing '{search_query}'")
+    
+    for i in range(0, len(filtered_pages), cols_per_row):
         cols = st.columns(cols_per_row)
         for j in range(cols_per_row):
             page_idx = i + j
-            if page_idx < num_pages:
-                page_num = list(sorted(pages_dict.keys()))[page_idx]
+            if page_idx < len(filtered_pages):
+                page_num = filtered_pages[page_idx]
                 with cols[j]:
                     if page_num in answer_pages:
                         label = f"🟢 {page_num}"
@@ -139,17 +192,47 @@ def display_document_pages(doc_name, pages_dict, analyzed_pages, answer_pages):
         if selected['doc'] == doc_name:
             st.markdown("---")
             st.subheader(f"Page {selected['num']} Content")
+  
+            prev_page = selected['num'] - 1
+            next_page = selected['num'] + 1
+            col1, col2, col3 = st.columns([1, 6, 1])
+            with col1:
+                if prev_page in pages_dict:
+                    if st.button("◀ Previous", key=f"prev_{doc_name}_{selected['num']}"):
+                        st.session_state.selected_page = {
+                            'doc': doc_name,
+                            'num': prev_page,
+                            'content': pages_dict[prev_page]
+                        }
+                        st.rerun()
+            with col3:
+                if next_page in pages_dict:
+                    if st.button("Next ▶", key=f"next_{doc_name}_{selected['num']}"):
+                        st.session_state.selected_page = {
+                            'doc': doc_name,
+                            'num': next_page,
+                            'content': pages_dict[next_page]
+                        }
+                        st.rerun()
+            
             with st.container():
-                st.markdown(selected['content'])
+                content = selected['content']
+                if search_query:
+                    content = content.replace(
+                        search_query, 
+                        f"<mark>{search_query}</mark>"
+                    )
+                st.markdown(content, unsafe_allow_html=True)
 
-def process_file(file, max_items=None, skip_xml=True):
+@st.cache_data
+def process_file(file_content, max_items=None, skip_xml=True):
     data = []
     line_counter = 0
     in_tag = False
     json_str = ""
     bracket_count = 0
     
-    for line in file:
+    for line in file_content:
         line_counter += 1
         
         try:
@@ -206,6 +289,7 @@ def process_file(file, max_items=None, skip_xml=True):
     
     return data, line_counter
 
+@st.cache_data
 def extract_questions(data):
     questions = defaultdict(list)
     current_question = None
@@ -255,28 +339,58 @@ def get_step_name(step):
         return f"{response_type.replace('_', ' ').title()}"
 
 def display_step(step, index):
-    with st.expander(f"Step {index + 1}: {get_step_name(step)}"):
-        col1, col2 = st.columns(2)
+    response_type = step.get('response_type', 'unknown')
+    
+    colors = {
+        'question_classifier': '#f9d5e5',
+        'company_identifier': '#eeeeee',
+        'financial_data': '#e3f2fd',
+        'corporate_actions': '#e8f5e9',
+        'business_operations': '#fff8e1',
+        'answer': '#fff9c4',
+    }
+    
+    color = colors.get(response_type, '#f5f5f5')
+    
+    with st.expander(f"Step {index + 1}: {get_step_name(step)}", expanded=False):
+        st.markdown(f"<div style='background-color: {color}; padding: 5px; border-radius: 5px;'>Step type: {response_type}</div>", unsafe_allow_html=True)
         
+        col1, col2 = st.columns(2)
         with col1:
-            st.markdown("#### User Prompt")
+            if 'company_name' in step and step['company_name']:
+                st.info(f"Company: {step['company_name']}")
+            if 'page_num' in step and step['page_num'] is not None:
+                st.info(f"Page: {step['page_num']}")
+        
+        with col2:
+            if 'timestamp' in step:
+                st.info(f"Timestamp: {step['timestamp']}")
+            if 'start_time' in step and 'end_time' in step:
+                duration = step['end_time'] - step['start_time']
+                st.info(f"Duration: {duration:.2f}s")
+        
+        prompt_tab, response_tab, raw_tab = st.tabs(["User Prompt", "Response", "Raw JSON"])
+        
+        with prompt_tab:
             if 'user_prompt' in step:
                 st.markdown(f"<div class='user-prompt'>{step['user_prompt']}</div>", unsafe_allow_html=True)
             else:
                 st.write("No user prompt available")
         
-        with col2:
-            st.markdown("#### Response")
+        with response_tab:
             if 'response' in step and 'choices' in step['response'] and len(step['response']['choices']) > 0:
                 content = step['response']['choices'][0].get('message', {}).get('content', 'No content')
                 
                 try:
                     parsed = json.loads(content)
-                    st.json(parsed)
+                    st.code(json.dumps(parsed, indent=2), language="json")
                 except:
                     st.markdown(f"<div class='response-content'>{content}</div>", unsafe_allow_html=True)
             else:
                 st.write("No response available")
+        
+        with raw_tab:
+            st.code(json.dumps(step, indent=2), language="json")
 
 def create_workflow_image(steps):
     html = """
@@ -299,9 +413,15 @@ def create_workflow_image(steps):
             margin: 10px;
             padding: 15px;
             border-radius: 8px;
-            min-width: 200px;
+            min-width: 220px;
             text-align: center;
             position: relative;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .step:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
         }
         .step:not(:last-child):after {
             content: "";
@@ -343,6 +463,11 @@ def create_workflow_image(steps):
             background-color: #f5f5f5;
             border: 1px solid #333;
         }
+        .metadata {
+            font-size: 0.8em;
+            color: #555;
+            margin-top: 5px;
+        }
     </style>
     </head>
     <body>
@@ -363,13 +488,13 @@ def create_workflow_image(steps):
             label = "Company Identification"
         elif response_type == 'financial_data':
             class_name = 'financial-data'
-            label = f"Financial Data<br>{company_name or ''} (Page {page_num or 'N/A'})"
+            label = f"Financial Data"
         elif response_type == 'corporate_actions':
             class_name = 'corporate-actions'
-            label = f"Corporate Actions<br>{company_name or ''} (Page {page_num or 'N/A'})"
+            label = f"Corporate Actions"
         elif response_type == 'business_operations':
             class_name = 'business-operations'
-            label = f"Business Operations<br>{company_name or ''} (Page {page_num or 'N/A'})"
+            label = f"Business Operations"
         elif response_type == 'answer':
             class_name = 'answer'
             label = "Final Answer"
@@ -377,7 +502,13 @@ def create_workflow_image(steps):
             class_name = 'other'
             label = response_type.replace('_', ' ').title()
         
-        html += f'<div class="step {class_name}">{label}</div>\n'
+        metadata = ""
+        if company_name:
+            metadata += f"<div class='metadata'>{company_name}</div>"
+        if page_num is not None:
+            metadata += f"<div class='metadata'>Page {page_num}</div>"
+        
+        html += f'<div class="step {class_name}">{label}{metadata}</div>\n'
     
     html += """
         </div>
@@ -396,52 +527,100 @@ def main():
     if 'selected_page' not in st.session_state:
         st.session_state.selected_page = None
     
-    st.title("🔍 Simplified LLM Chain Analysis Tool")
+    if 'dark_mode' not in st.session_state:
+        st.session_state.dark_mode = False
+    
+    st.title("🔍 LLM Chain Analysis Tool")
     
     st.write("""
     This tool helps you analyze the workflow of a question-answering service from JSONL debug files.
     Upload your file to see how questions are processed through various steps.
     """)
     
-    st.sidebar.header("Settings")
+    st.sidebar.header("⚙️ Settings")
     
-    doc_dir = st.sidebar.text_input(
-        "Document Directory", 
-        value=DOCUMENT_DIR,
-        help="Directory containing markdown files of documents"
-    )
+    dark_mode = st.sidebar.checkbox("Dark Mode", value=st.session_state.dark_mode)
+    if dark_mode != st.session_state.dark_mode:
+        st.session_state.dark_mode = dark_mode
+        if dark_mode:
+            st.markdown("<style>body { color: white; background-color: #121212; }</style>", unsafe_allow_html=True)
+            st.markdown('<div class="dark-mode">', unsafe_allow_html=True)
+        else:
+            st.markdown("<style>body { color: black; background-color: white; }</style>", unsafe_allow_html=True)
+    
+    with st.sidebar.expander("Document Settings", expanded=False):
+        doc_dir = st.text_input(
+            "Document Directory", 
+            value=DOCUMENT_DIR,
+            help="Directory containing markdown files of documents"
+        )
+        
+        if st.button("Refresh Document List"):
+            st.cache_data.clear()
+            st.success("Document list refreshed!")
     
     uploaded_file = st.file_uploader("Upload JSONL file", type=["jsonl", "json", "txt"])
     
     if uploaded_file is not None:
-        st.sidebar.header("Processing Options")
-        skip_xml = st.sidebar.checkbox("Skip XML-like tags", value=True)
-        limit_items = st.sidebar.checkbox("Limit number of items", value=False)
+        st.sidebar.header("🔄 Processing Options")
         
-        max_items = None
-        if limit_items:
-            max_items = st.sidebar.number_input("Maximum items to process", min_value=10, value=1000, step=100)
+        with st.sidebar.expander("File Processing Options", expanded=True):
+            skip_xml = st.checkbox("Skip XML-like tags", value=True)
+            limit_items = st.checkbox("Limit number of items", value=False)
+            
+            max_items = None
+            if limit_items:
+                max_items = st.number_input("Maximum items to process", min_value=10, value=1000, step=100)
+        
+        progress_bar = st.progress(0)
         
         with st.spinner("Processing file..."):
+            file_content = uploaded_file.getvalue()
+            uploaded_file.seek(0)
+            
+            for i in range(10):
+                progress_bar.progress((i + 1) * 10)
+                time.sleep(0.05)
+            
             data, line_count = process_file(uploaded_file, max_items, skip_xml)
+            progress_bar.progress(100)
         
         if data:
             st.success(f"Successfully processed {len(data)} items from {line_count} lines")
             
             questions = extract_questions(data)
             
-            st.subheader("Questions Analyzed")
+            st.subheader("📊 Questions Analyzed")
             if not questions:
                 st.warning("No questions found in the data")
                 return
-                
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Items", len(data))
-            col2.metric("Questions Found", len(questions))
-            col3.metric("Total Question Steps", sum(len(steps) for steps in questions.values()))
             
-            question_list = list(questions.keys())
-            selected_question = st.selectbox("Select a question to analyze:", question_list)
+            with st.container():
+                st.markdown('<div class="metrics-container">', unsafe_allow_html=True)
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Items", len(data))
+                col2.metric("Questions Found", len(questions))
+                col3.metric("Total Question Steps", sum(len(steps) for steps in questions.values()))
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.markdown('<div class="search-box">', unsafe_allow_html=True)
+            search_term = st.text_input("Search questions:", placeholder="Type to filter questions...")
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            filtered_questions = question_list = list(questions.keys())
+            if search_term:
+                filtered_questions = [q for q in question_list if search_term.lower() in q.lower()]
+                if filtered_questions:
+                    st.success(f"Found {len(filtered_questions)} matching questions")
+                else:
+                    st.warning(f"No questions found containing '{search_term}'")
+                    filtered_questions = question_list
+            
+            selected_question = st.selectbox(
+                "Select a question to analyze:", 
+                filtered_questions,
+                format_func=lambda x: f"{x[:80]}..." if len(x) > 80 else x
+            )
             
             if selected_question:
                 steps = questions[selected_question]
@@ -449,21 +628,43 @@ def main():
                 st.markdown(f"**Number of steps:** {len(steps)}")
                 
                 response_types = pd.Series([step.get('response_type') for step in steps if 'response_type' in step]).value_counts()
-                st.subheader("Step Types")
-                st.bar_chart(response_types)
                 
-                tab1, tab2, tab3, tab4 = st.tabs(["Step Details", "Workflow Visualization", "Document Pages", "Raw Data"])
+                tab1, tab2, tab3, tab4, tab5 = st.tabs([
+                    "Step Details", 
+                    "Workflow Visualization", 
+                    "Document Pages", 
+                    "Statistics",
+                    "Raw Data"
+                ])
                 
                 with tab1:
-                    for i, step in enumerate(steps):
+                    step_types = list(set([step.get('response_type') for step in steps if 'response_type' in step]))
+                    selected_types = st.multiselect(
+                        "Filter by step type:",
+                        options=step_types,
+                        default=step_types,
+                        format_func=lambda x: x.replace('_', ' ').title()
+                    )
+                    
+                    filtered_steps = steps
+                    if selected_types and len(selected_types) < len(step_types):
+                        filtered_steps = [step for step in steps if step.get('response_type') in selected_types]
+                        st.info(f"Showing {len(filtered_steps)} of {len(steps)} steps")
+                    
+                    expand_all = st.checkbox("Expand all steps", value=False)
+                    
+                    for i, step in enumerate(filtered_steps):
                         display_step(step, i)
                 
                 with tab2:
-                    st.subheader("Workflow Visualization")
-                    
-                    data_uri = create_workflow_image(steps)
-                    height = min(150 * len(steps), 800)
-                    st.markdown(f'<iframe src="{data_uri}" width="100%" height="{height}" frameBorder="0"></iframe>', unsafe_allow_html=True)
+                    with st.container():
+                        st.markdown('<div class="workflow-section">', unsafe_allow_html=True)
+                        st.subheader("Workflow Visualization")
+                        
+                        data_uri = create_workflow_image(steps)
+                        height = min(100 + (80 * len(steps)), 600)
+                        st.markdown(f'<iframe src="{data_uri}" width="100%" height="{height}" frameBorder="0"></iframe>', unsafe_allow_html=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
                     
                     st.subheader("Company Analysis")
                     companies = set([step.get('company_name') for step in steps if step.get('company_name')])
@@ -542,18 +743,84 @@ def main():
                         st.info("No company identified in the analysis")
                 
                 with tab4:
+                    st.subheader("Step Type Distribution")
+                    st.bar_chart(response_types)
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.subheader("Step Timing")
+                        has_timing = any(['start_time' in step and 'end_time' in step for step in steps])
+                        
+                        if has_timing:
+                            timing_data = {}
+                            for step in steps:
+                                if 'start_time' in step and 'end_time' in step:
+                                    response_type = step.get('response_type', 'unknown')
+                                    duration = step['end_time'] - step['start_time']
+                                    if response_type not in timing_data:
+                                        timing_data[response_type] = []
+                                    timing_data[response_type].append(duration)
+                            
+                            avg_durations = {k: sum(v)/len(v) for k, v in timing_data.items()}
+                            df = pd.DataFrame({'Average Duration (s)': avg_durations})
+                            st.bar_chart(df)
+                        else:
+                            st.info("No timing data available in this trace")
+                    
+                    with col2:
+                        st.subheader("Document Pages Usage")
+                        if analyzed_pages:
+                            st.write(f"Total pages analyzed: {len(analyzed_pages)}")
+                            st.write(f"Pages used in answer: {len(answer_pages)}")
+                            
+                            if answer_pages:
+                                usage_ratio = len(answer_pages) / len(analyzed_pages) * 100
+                                st.metric("Page Usage Efficiency", f"{usage_ratio:.1f}%")
+                
+                with tab5:
                     st.subheader("Raw Data")
-                    if st.button("Download JSON"):
-                        json_str = json.dumps(steps, indent=2)
-                        st.download_button(
-                            "Download JSON file",
-                            json_str,
-                            file_name=f"{selected_question[:50].replace('?', '')}.json",
-                            mime="application/json"
-                        )
+                    
+                    download_options = st.radio(
+                        "Download format:",
+                        ["JSON", "CSV (if possible)"]
+                    )
+                    
+                    if download_options == "JSON":
+                        if st.button("Download JSON"):
+                            json_str = json.dumps(steps, indent=2)
+                            st.download_button(
+                                "Download JSON file",
+                                json_str,
+                                file_name=f"{selected_question[:50].replace('?', '')}.json",
+                                mime="application/json"
+                            )
+                    else:
+                        try:
+                            flat_data = []
+                            for step in steps:
+                                flat_step = {
+                                    'response_type': step.get('response_type', ''),
+                                    'company_name': step.get('company_name', ''),
+                                    'page_num': step.get('page_num', ''),
+                                }
+                                flat_data.append(flat_step)
+                            
+                            df = pd.DataFrame(flat_data)
+                            csv = df.to_csv(index=False)
+                            
+                            st.download_button(
+                                "Download CSV file",
+                                csv,
+                                file_name=f"{selected_question[:50].replace('?', '')}.csv",
+                                mime="text/csv"
+                            )
+                        except Exception as e:
+                            st.error(f"Could not convert to CSV: {e}")
+                            st.info("Try downloading as JSON instead")
                     
                     with st.expander("View Raw JSON"):
-                        st.json(steps)
+                        st.code(json.dumps(steps, indent=2), language="json")
         else:
             st.error("No valid JSON objects found in the file")
 
